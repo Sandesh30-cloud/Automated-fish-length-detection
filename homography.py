@@ -7,7 +7,6 @@ from pathlib import Path
 from pupil_apriltags import Detector
 
 # ================= CONFIG =================
-IMAGE_PATH = "image_8.jpeg"
 TAG_SIZE_MM = 100.0
 MAX_WIDTH = 1000
 MAX_HEIGHT = 700
@@ -371,7 +370,7 @@ def process_directory_loop(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Homography-based fish measurement")
-    parser.add_argument("--image", type=str, default=IMAGE_PATH, help="Single image path")
+    parser.add_argument("--image", type=str, default=None, help="Single image path")
     parser.add_argument(
         "--auto",
         action="store_true",
@@ -417,6 +416,8 @@ if __name__ == "__main__":
             visualize=args.visualize,
         )
     else:
+        if not args.image:
+            raise ValueError("Provide --image for single-image mode or use --auto.")
         if not os.path.exists(args.image):
             print(f"Image not found: {args.image}")
             print(f"Current directory: {os.getcwd()}")
