@@ -19,14 +19,95 @@ MIN_PERIMETER_PX = 180.0
 MAX_BACKGROUND_AREA_RATIO = 0.80
 # =========================================
 
-at_detector = Detector(
-    families="tag36h11",
-    nthreads=4,
-    quad_decimate=2.0,
-    quad_sigma=0.8,
-    refine_edges=1,
-    decode_sharpening=0.5,
-)
+WATER_PROFILES = {
+    "clear": {
+        "clahe_clip": 1.8,
+        "clahe_grid": 8,
+        "blur_ksize": 5,
+        "canny_low": 60,
+        "canny_high": 170,
+        "adaptive_block_size": 31,
+        "adaptive_c": 5,
+        "color_s_min": 45,
+        "color_v_min": 35,
+        "color_open_kernel": 5,
+        "color_close_kernel": 13,
+        "min_object_area_px": MIN_OBJECT_AREA_PX,
+        "min_perimeter_px": MIN_PERIMETER_PX,
+        "min_aspect_ratio": MIN_ASPECT_RATIO,
+    },
+    "murky": {
+        "clahe_clip": 3.0,
+        "clahe_grid": 8,
+        "blur_ksize": 7,
+        "canny_low": 35,
+        "canny_high": 120,
+        "adaptive_block_size": 41,
+        "adaptive_c": 3,
+        "color_s_min": 20,
+        "color_v_min": 22,
+        "color_open_kernel": 3,
+        "color_close_kernel": 17,
+        "min_object_area_px": 1400.0,
+        "min_perimeter_px": 140.0,
+        "min_aspect_ratio": 1.9,
+    },
+}
+
+APRILTAG_DETECTORS = [
+    Detector(
+        families="tag36h11 tag25h9 tag16h5",
+        nthreads=4,
+        quad_decimate=2.0,
+        quad_sigma=0.8,
+        refine_edges=1,
+        decode_sharpening=0.5,
+    ),
+    Detector(
+        families="tag36h11 tag25h9 tag16h5",
+        nthreads=4,
+        quad_decimate=1.0,
+        quad_sigma=0.0,
+        refine_edges=1,
+        decode_sharpening=0.8,
+    ),
+]
+
+
+def ensure_odd(value: int) -> int:
+    return value if value % 2 == 1 else value + 1
+
+
+def get_profile(profile_name: str) -> dict:
+    if profile_name not in WATER_PROFILES:
+        raise ValueError(f"Unsupported water profile: {profile_name}")
+    return WATER_PROFILES[profile_name]
+
+
+def preprocess_gray(gray: np.ndarray, profile: dict) -> np.ndarray:
+    clahe = cv2.createCLAHE(
+        clipLimit=float(profile["clahe_clip"]),
+        tileGridSize=(int(profile["clahe_grid"]), int(profile["clahe_grid"])),
+    )
+    enhanced = clahe.apply(gray)
+    enhanced = cv2.bilateralFilter(enhanced, 7, 40, 40)
+    blur_k = ensure_odd(int(profile["blur_ksize"]))
+    return cv2.GaussianBlur(enhanced, (blur_k, blur_k), 0)
+
+
+def detect_apriltag(gray: np.ndarray) -> list:
+    thresholded = cv2.adaptiveThreshold(
+        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 2
+    )
+    inverted = cv2.bitwise_not(thresholded)
+    detection_inputs = [gray, thresholded, inverted]
+
+    for image in detection_inputs:
+        for detector in APRILTAG_DETECTORS:
+            detections = detector.detect(image)
+            if detections:
+                return detections
+    return []
 
 
 def max_diameter_from_points(points_xy: np.ndarray):
@@ -90,13 +171,19 @@ def contour_aspect_ratio(contour: np.ndarray) -> float:
     return float(hi / lo)
 
 
-def detect_object_contours(frame: np.ndarray, ignore_mask: np.ndarray) -> list:
+def detect_object_contours(frame: np.ndarray, ignore_mask: np.ndarray, profile: dict) -> list:
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    blur = preprocess_gray(gray, profile)
 
-    edges = cv2.Canny(blur, 60, 170)
+    edges = cv2.Canny(blur, int(profile["canny_low"]), int(profile["canny_high"]))
+    block_size = ensure_odd(int(profile["adaptive_block_size"]))
     thresh = cv2.adaptiveThreshold(
-        blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 31, 5
+        blur,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV,
+        block_size,
+        int(profile["adaptive_c"]),
     )
     combined = cv2.bitwise_or(edges, thresh)
     combined = cv2.morphologyEx(
@@ -113,25 +200,38 @@ def detect_object_contours(frame: np.ndarray, ignore_mask: np.ndarray) -> list:
     return contours
 
 
-def detect_color_object_contours(frame: np.ndarray, ignore_mask: np.ndarray) -> list:
+def detect_color_object_contours(frame: np.ndarray, ignore_mask: np.ndarray, profile: dict) -> list:
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     h, s, v = cv2.split(hsv)
     # Keep saturated non-brown colors (helps isolate fish/tools from wood-like backgrounds).
-    color_mask = ((s > 45) & ((h < 5) | (h > 30)) & (v > 35)).astype(np.uint8) * 255
+    color_mask = (
+        (s > int(profile["color_s_min"]))
+        & ((h < 5) | (h > 30))
+        & (v > int(profile["color_v_min"]))
+    ).astype(np.uint8) * 255
+    open_k = int(profile["color_open_kernel"])
+    close_k = int(profile["color_close_kernel"])
     color_mask = cv2.morphologyEx(
-        color_mask, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8), iterations=1
+        color_mask, cv2.MORPH_OPEN, np.ones((open_k, open_k), np.uint8), iterations=1
     )
     color_mask = cv2.morphologyEx(
-        color_mask, cv2.MORPH_CLOSE, np.ones((13, 13), np.uint8), iterations=2
+        color_mask, cv2.MORPH_CLOSE, np.ones((close_k, close_k), np.uint8), iterations=2
     )
     color_mask[ignore_mask > 0] = 0
     contours, _ = cv2.findContours(color_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     return contours
 
 
-def analyze_image(image_path: str, visualize: bool = False, wait_for_key: bool = False) -> dict:
+def analyze_image(
+    image_path: str,
+    visualize: bool = False,
+    wait_for_key: bool = False,
+    water_profile: str = "murky",
+) -> dict:
+    profile = get_profile(water_profile)
     result = {
         "image_path": image_path,
+        "water_profile": water_profile,
         "tag_detected": False,
         "segmentation_mode": "none",
         "detected_contours": 0,
@@ -149,10 +249,9 @@ def analyze_image(image_path: str, visualize: bool = False, wait_for_key: bool =
     disp_w, disp_h = int(w * disp_scale), int(h * disp_scale)
 
     gray = cv2.cvtColor(original_image, cv2.COLOR_BGR2GRAY)
-    gray = cv2.equalizeHist(gray)
-    gray = cv2.GaussianBlur(gray, (5, 5), 0)
+    gray = preprocess_gray(gray, profile)
 
-    detections = at_detector.detect(gray)
+    detections = detect_apriltag(gray)
     if not detections:
         if visualize:
             cv2.imshow("Measurement", cv2.resize(original_image, (disp_w, disp_h)))
@@ -186,10 +285,13 @@ def analyze_image(image_path: str, visualize: bool = False, wait_for_key: bool =
     max_area_px = MAX_OBJECT_AREA_RATIO * (w * h)
     bg_area_px = MAX_BACKGROUND_AREA_RATIO * (w * h)
     contour_sets = [
-        ("edge", detect_object_contours(original_image, ignore_mask)),
-        ("color", detect_color_object_contours(original_image, ignore_mask)),
+        ("edge", detect_object_contours(original_image, ignore_mask, profile)),
+        ("color", detect_color_object_contours(original_image, ignore_mask, profile)),
     ]
 
+    min_object_area_px = float(profile["min_object_area_px"])
+    min_aspect_ratio = float(profile["min_aspect_ratio"])
+    min_perimeter_px = float(profile["min_perimeter_px"])
     chosen_mode = "none"
     chosen_contours = []
     measurements = []
@@ -197,20 +299,20 @@ def analyze_image(image_path: str, visualize: bool = False, wait_for_key: bool =
         local_measurements = []
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            if area < MIN_OBJECT_AREA_PX or area > max_area_px:
+            if area < min_object_area_px or area > max_area_px:
                 continue
             if area > bg_area_px:
                 continue
             touches_border = contour_touches_border(cnt, w, h, BORDER_REJECT_PX)
             aspect = contour_aspect_ratio(cnt)
             perimeter = cv2.arcLength(cnt, True)
-            if touches_border and (aspect < (MIN_ASPECT_RATIO + 0.8) or perimeter < (MIN_PERIMETER_PX + 80.0)):
+            if touches_border and (aspect < (min_aspect_ratio + 0.8) or perimeter < (min_perimeter_px + 80.0)):
                 continue
             if contour_overlap_ratio_with_mask(cnt, ignore_mask) > 0.02:
                 continue
-            if aspect < MIN_ASPECT_RATIO:
+            if aspect < min_aspect_ratio:
                 continue
-            if perimeter < MIN_PERIMETER_PX:
+            if perimeter < min_perimeter_px:
                 continue
 
             cnt_mm = cv2.perspectiveTransform(cnt.astype(np.float32), H).reshape(-1, 2)
@@ -289,9 +391,19 @@ def analyze_image(image_path: str, visualize: bool = False, wait_for_key: bool =
     return result
 
 
-def process_image(image_path: str, visualize: bool = True, wait_for_key: bool = True) -> bool:
+def process_image(
+    image_path: str,
+    visualize: bool = True,
+    wait_for_key: bool = True,
+    water_profile: str = "murky",
+) -> bool:
     print(f"\nProcessing: {image_path}")
-    analysis = analyze_image(image_path, visualize=visualize, wait_for_key=wait_for_key)
+    analysis = analyze_image(
+        image_path,
+        visualize=visualize,
+        wait_for_key=wait_for_key,
+        water_profile=water_profile,
+    )
 
     if not analysis["tag_detected"]:
         print("No AprilTag detected")
@@ -321,6 +433,7 @@ def process_directory_loop(
     interval_seconds: float = 2.0,
     extensions=(".jpg", ".jpeg", ".png"),
     visualize: bool = False,
+    water_profile: str = "murky",
 ) -> None:
     input_path = Path(input_dir)
     input_path.mkdir(parents=True, exist_ok=True)
@@ -355,6 +468,7 @@ def process_directory_loop(
                         str(file_path),
                         visualize=visualize,
                         wait_for_key=False,
+                        water_profile=water_profile,
                     )
                 except Exception as exc:
                     print(f"Failed to process {file_path}: {exc}")
@@ -399,6 +513,12 @@ if __name__ == "__main__":
         action="store_true",
         help="Show OpenCV visualization window (optional for Pi with desktop)",
     )
+    parser.add_argument(
+        "--water-profile",
+        choices=sorted(WATER_PROFILES.keys()),
+        default="murky",
+        help="Segmentation profile tuned for water conditions.",
+    )
     args = parser.parse_args()
 
     if args.auto:
@@ -414,6 +534,7 @@ if __name__ == "__main__":
             interval_seconds=args.interval_seconds,
             extensions=exts,
             visualize=args.visualize,
+            water_profile=args.water_profile,
         )
     else:
         if not args.image:
@@ -422,4 +543,9 @@ if __name__ == "__main__":
             print(f"Image not found: {args.image}")
             print(f"Current directory: {os.getcwd()}")
         else:
-            process_image(args.image, visualize=True, wait_for_key=True)
+            process_image(
+                args.image,
+                visualize=True,
+                wait_for_key=True,
+                water_profile=args.water_profile,
+            )

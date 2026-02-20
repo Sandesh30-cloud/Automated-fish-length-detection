@@ -80,12 +80,16 @@ def process_iteration(
     inference_module: ModuleType,
     fish_model,
     fish_threshold: float,
+    visualize: bool,
 ) -> None:
     LOGGER.info("Processing image: %s", image_path)
 
     prediction = inference_module.predict_fish(
         str(image_path), model=fish_model, threshold=fish_threshold
     )
+    if visualize:
+        show_fish_detection_window(image_path=image_path, prediction=prediction)
+
     if not prediction["fish_present"]:
         LOGGER.info(
             "No fish detected (confidence=%.3f, raw_probability=%.3f).",
@@ -100,7 +104,7 @@ def process_iteration(
         prediction["raw_probability"],
     )
 
-    analysis = homography.analyze_image(str(image_path), visualize=False, wait_for_key=False)
+    analysis = homography.analyze_image(str(image_path), visualize=visualize, wait_for_key=False)
     fish_count = analysis["fish_count"]
     lengths = analysis["lengths_mm"]
     if fish_count == 0:
@@ -109,6 +113,23 @@ def process_iteration(
 
     lengths_str = ", ".join(f"{length:.2f}" for length in lengths)
     LOGGER.info("Fish count: %d | lengths_mm: [%s]", fish_count, lengths_str)
+
+
+def show_fish_detection_window(image_path: Path, prediction: dict) -> None:
+    frame = cv2.imread(str(image_path))
+    if frame is None:
+        LOGGER.warning("Could not open image for visualization: %s", image_path)
+        return
+
+    label = "Fish detected" if prediction["fish_present"] else "No fish"
+    confidence = prediction["confidence"]
+    raw_prob = prediction["raw_probability"]
+    color = (0, 200, 0) if prediction["fish_present"] else (0, 0, 220)
+
+    cv2.putText(frame, f"{label} | conf={confidence:.2f}", (12, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.75, color, 2)
+    cv2.putText(frame, f"raw_prob={raw_prob:.3f}", (12, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2)
+    cv2.imshow("Fish Detection", frame)
+    cv2.waitKey(1)
 
 
 def run_controller(
@@ -121,6 +142,7 @@ def run_controller(
     settle_seconds: float,
     interval_seconds: float,
     fish_threshold: float,
+    visualize: bool,
     max_iterations: Optional[int],
 ) -> None:
     inference_path = Path(__file__).resolve().parent / "fish-present-or-not" / "inference.py"
@@ -175,6 +197,7 @@ def run_controller(
                     inference_module=inference_module,
                     fish_model=fish_model,
                     fish_threshold=fish_threshold,
+                    visualize=visualize,
                 )
                 if source == "directory" and archive_dir is not None:
                     target = archive_dir / image_path.name
@@ -217,6 +240,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--interval-seconds", type=float, default=2.0)
     parser.add_argument("--fish-threshold", type=float, default=0.5)
+    parser.add_argument(
+        "--visualize",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Show fish detection and homography output windows.",
+    )
     parser.add_argument("--max-iterations", type=int, default=None)
     parser.add_argument("--log-level", type=str, default="INFO")
     return parser.parse_args()
@@ -245,6 +274,7 @@ def main() -> int:
             settle_seconds=args.settle_seconds,
             interval_seconds=args.interval_seconds,
             fish_threshold=args.fish_threshold,
+            visualize=args.visualize,
             max_iterations=args.max_iterations,
         )
         return 0
