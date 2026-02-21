@@ -30,11 +30,21 @@ WATER_PROFILES = {
         "adaptive_c": 5,
         "color_s_min": 45,
         "color_v_min": 35,
+        "color_hue_low_max": 45,
+        "color_hue_high_min": 150,
         "color_open_kernel": 5,
         "color_close_kernel": 13,
         "min_object_area_px": MIN_OBJECT_AREA_PX,
         "min_perimeter_px": MIN_PERIMETER_PX,
         "min_aspect_ratio": MIN_ASPECT_RATIO,
+        "max_aspect_ratio": 9.0,
+        "min_length_mm": 40.0,
+        "max_length_mm": 1200.0,
+        "min_solidity": 0.35,
+        "min_length_px_factor": 0.45,
+        "min_thickness_px_factor": 0.10,
+        "min_area_tag_ratio": 0.10,
+        "bottom_ignore_ratio": 0.10,
     },
     "murky": {
         "clahe_clip": 3.0,
@@ -46,11 +56,21 @@ WATER_PROFILES = {
         "adaptive_c": 3,
         "color_s_min": 20,
         "color_v_min": 22,
+        "color_hue_low_max": 50,
+        "color_hue_high_min": 145,
         "color_open_kernel": 3,
         "color_close_kernel": 17,
         "min_object_area_px": 1400.0,
         "min_perimeter_px": 140.0,
         "min_aspect_ratio": 1.9,
+        "max_aspect_ratio": 10.5,
+        "min_length_mm": 35.0,
+        "max_length_mm": 1200.0,
+        "min_solidity": 0.30,
+        "min_length_px_factor": 0.40,
+        "min_thickness_px_factor": 0.08,
+        "min_area_tag_ratio": 0.08,
+        "bottom_ignore_ratio": 0.14,
     },
 }
 
@@ -95,18 +115,19 @@ def preprocess_gray(gray: np.ndarray, profile: dict) -> np.ndarray:
     return cv2.GaussianBlur(enhanced, (blur_k, blur_k), 0)
 
 
-def detect_apriltag(gray: np.ndarray) -> list:
-    thresholded = cv2.adaptiveThreshold(
-        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 2
-    )
-    inverted = cv2.bitwise_not(thresholded)
-    detection_inputs = [gray, thresholded, inverted]
+def detect_apriltag(gray_candidates: list) -> list:
+    for gray in gray_candidates:
+        thresholded = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 2
+        )
+        inverted = cv2.bitwise_not(thresholded)
+        detection_inputs = [gray, thresholded, inverted]
 
-    for image in detection_inputs:
-        for detector in APRILTAG_DETECTORS:
-            detections = detector.detect(image)
-            if detections:
-                return detections
+        for image in detection_inputs:
+            for detector in APRILTAG_DETECTORS:
+                detections = detector.detect(image)
+                if detections:
+                    return detections
     return []
 
 
@@ -171,6 +192,17 @@ def contour_aspect_ratio(contour: np.ndarray) -> float:
     return float(hi / lo)
 
 
+def contour_solidity(contour: np.ndarray) -> float:
+    area = cv2.contourArea(contour)
+    if area <= 1e-6:
+        return 0.0
+    hull = cv2.convexHull(contour)
+    hull_area = cv2.contourArea(hull)
+    if hull_area <= 1e-6:
+        return 0.0
+    return float(area / hull_area)
+
+
 def detect_object_contours(frame: np.ndarray, ignore_mask: np.ndarray, profile: dict) -> list:
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     blur = preprocess_gray(gray, profile)
@@ -203,10 +235,12 @@ def detect_object_contours(frame: np.ndarray, ignore_mask: np.ndarray, profile: 
 def detect_color_object_contours(frame: np.ndarray, ignore_mask: np.ndarray, profile: dict) -> list:
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     h, s, v = cv2.split(hsv)
-    # Keep saturated non-brown colors (helps isolate fish/tools from wood-like backgrounds).
+    # Emphasize warm fish hues (orange/red/yellow) and suppress cyan water/background.
+    hue_low_max = int(profile["color_hue_low_max"])
+    hue_high_min = int(profile["color_hue_high_min"])
     color_mask = (
         (s > int(profile["color_s_min"]))
-        & ((h < 5) | (h > 30))
+        & ((h <= hue_low_max) | (h >= hue_high_min))
         & (v > int(profile["color_v_min"]))
     ).astype(np.uint8) * 255
     open_k = int(profile["color_open_kernel"])
@@ -248,10 +282,11 @@ def analyze_image(
     disp_scale = min(MAX_WIDTH / w, MAX_HEIGHT / h, 1.0)
     disp_w, disp_h = int(w * disp_scale), int(h * disp_scale)
 
-    gray = cv2.cvtColor(original_image, cv2.COLOR_BGR2GRAY)
-    gray = preprocess_gray(gray, profile)
+    gray_raw = cv2.cvtColor(original_image, cv2.COLOR_BGR2GRAY)
+    gray_eq = cv2.equalizeHist(gray_raw)
+    gray_preprocessed = preprocess_gray(gray_raw, profile)
 
-    detections = detect_apriltag(gray)
+    detections = detect_apriltag([gray_raw, gray_eq, gray_preprocessed])
     if not detections:
         if visualize:
             cv2.imshow("Measurement", cv2.resize(original_image, (disp_w, disp_h)))
@@ -277,10 +312,15 @@ def analyze_image(
 
     # Build ignore mask around the tag in original image.
     tag_side_px = float(np.mean([np.linalg.norm(corners[i] - corners[(i + 1) % 4]) for i in range(4)]))
+    tag_area_px = float(cv2.contourArea(corners.astype(np.float32)))
     pad_px = max(6, int(tag_side_px * TAG_IGNORE_PAD_FACTOR))
     ignore_mask = np.zeros((h, w), dtype=np.uint8)
     cv2.fillPoly(ignore_mask, [corners.astype(np.int32)], 255)
     ignore_mask = cv2.dilate(ignore_mask, np.ones((pad_px, pad_px), np.uint8), iterations=1)
+    bottom_ignore_ratio = float(profile["bottom_ignore_ratio"])
+    if bottom_ignore_ratio > 0.0:
+        y_start = int(h * (1.0 - bottom_ignore_ratio))
+        ignore_mask[y_start:, :] = 255
 
     max_area_px = MAX_OBJECT_AREA_RATIO * (w * h)
     bg_area_px = MAX_BACKGROUND_AREA_RATIO * (w * h)
@@ -291,28 +331,42 @@ def analyze_image(
 
     min_object_area_px = float(profile["min_object_area_px"])
     min_aspect_ratio = float(profile["min_aspect_ratio"])
+    max_aspect_ratio = float(profile["max_aspect_ratio"])
     min_perimeter_px = float(profile["min_perimeter_px"])
+    min_length_mm = float(profile["min_length_mm"])
+    max_length_mm = float(profile["max_length_mm"])
+    min_solidity = float(profile["min_solidity"])
+    min_length_px_factor = float(profile["min_length_px_factor"])
+    min_thickness_px_factor = float(profile["min_thickness_px_factor"])
+    min_area_tag_ratio = float(profile["min_area_tag_ratio"])
+    min_area_px_dynamic = max(min_object_area_px, min_area_tag_ratio * tag_area_px)
     chosen_mode = "none"
     chosen_contours = []
     measurements = []
+    best_score = (-1.0, -1, -1.0)
     for mode_name, contours in contour_sets:
         local_measurements = []
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            if area < min_object_area_px or area > max_area_px:
+            if area < min_area_px_dynamic or area > max_area_px:
                 continue
             if area > bg_area_px:
                 continue
             touches_border = contour_touches_border(cnt, w, h, BORDER_REJECT_PX)
             aspect = contour_aspect_ratio(cnt)
             perimeter = cv2.arcLength(cnt, True)
-            if touches_border and (aspect < (min_aspect_ratio + 0.8) or perimeter < (min_perimeter_px + 80.0)):
+            solidity = contour_solidity(cnt)
+            if touches_border:
                 continue
             if contour_overlap_ratio_with_mask(cnt, ignore_mask) > 0.02:
                 continue
             if aspect < min_aspect_ratio:
                 continue
+            if aspect > max_aspect_ratio:
+                continue
             if perimeter < min_perimeter_px:
+                continue
+            if solidity < min_solidity:
                 continue
 
             cnt_mm = cv2.perspectiveTransform(cnt.astype(np.float32), H).reshape(-1, 2)
@@ -321,18 +375,36 @@ def analyze_image(
                 continue
 
             length_mm, p1_mm, p2_mm = axis_mm
+            if length_mm < min_length_mm or length_mm > max_length_mm:
+                continue
             pair_mm = np.array([[p1_mm, p2_mm]], dtype=np.float32)
             pair_px = cv2.perspectiveTransform(pair_mm, H_inv)[0]
+            length_px = float(np.linalg.norm(pair_px[0] - pair_px[1]))
+            if length_px < (min_length_px_factor * tag_side_px):
+                continue
+            rect = cv2.minAreaRect(cnt)
+            rw, rh = rect[1]
+            thickness_px = float(min(rw, rh))
+            if thickness_px < (min_thickness_px_factor * tag_side_px):
+                continue
             p1 = tuple(pair_px[0].astype(int))
             p2 = tuple(pair_px[1].astype(int))
             local_measurements.append((length_mm, cnt, p1, p2))
 
-        if len(local_measurements) > len(measurements):
+        local_measurements.sort(key=lambda x: x[0], reverse=True)
+        if local_measurements:
+            max_len = float(local_measurements[0][0])
+            total_len = float(sum(item[0] for item in local_measurements))
+            score = (max_len, len(local_measurements), total_len)
+        else:
+            score = (-1.0, -1, -1.0)
+
+        if score > best_score:
+            best_score = score
             measurements = local_measurements
             chosen_mode = mode_name
             chosen_contours = contours
 
-    measurements.sort(key=lambda x: x[0], reverse=True)
     result["segmentation_mode"] = chosen_mode
     result["detected_contours"] = len(chosen_contours)
     result["fish_count"] = len(measurements)

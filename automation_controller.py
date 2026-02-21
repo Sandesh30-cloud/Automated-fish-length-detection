@@ -80,12 +80,19 @@ def process_iteration(
     inference_module: ModuleType,
     fish_model,
     fish_threshold: float,
+    fish_margin: float,
+    fish_positive_when: str,
     visualize: bool,
 ) -> None:
     LOGGER.info("Processing image: %s", image_path)
 
-    prediction = inference_module.predict_fish(
-        str(image_path), model=fish_model, threshold=fish_threshold
+    prediction = robust_fish_prediction(
+        image_path=image_path,
+        inference_module=inference_module,
+        fish_model=fish_model,
+        fish_threshold=fish_threshold,
+        fish_margin=fish_margin,
+        fish_positive_when=fish_positive_when,
     )
     if visualize:
         show_fish_detection_window(image_path=image_path, prediction=prediction)
@@ -115,6 +122,60 @@ def process_iteration(
     LOGGER.info("Fish count: %d | lengths_mm: [%s]", fish_count, lengths_str)
 
 
+def robust_fish_prediction(
+    image_path: Path,
+    inference_module: ModuleType,
+    fish_model,
+    fish_threshold: float,
+    fish_margin: float,
+    fish_positive_when: str,
+) -> dict:
+    frame = cv2.imread(str(image_path))
+    if frame is None:
+        raise FileNotFoundError(f"Could not read image: {image_path}")
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+    clahe_gray = clahe.apply(gray)
+    clahe_bgr = cv2.cvtColor(clahe_gray, cv2.COLOR_GRAY2BGR)
+    denoised = cv2.fastNlMeansDenoisingColored(frame, None, 7, 7, 7, 21)
+
+    predictions = []
+    for variant_name, variant_img in (
+        ("original", frame),
+        ("clahe", clahe_bgr),
+        ("denoised", denoised),
+    ):
+        pred = inference_module.predict_fish_from_bgr(
+            img=variant_img,
+            model=fish_model,
+            threshold=fish_threshold,
+            fish_positive_when=fish_positive_when,
+        )
+        pred["variant"] = variant_name
+        predictions.append(pred)
+
+    if fish_positive_when == "higher":
+        best = max(predictions, key=lambda item: item["raw_probability"])
+        decision_threshold = max(0.0, fish_threshold - fish_margin)
+        fish_present = best["raw_probability"] > decision_threshold
+        fish_confidence = float(best["raw_probability"])
+    else:
+        best = min(predictions, key=lambda item: item["raw_probability"])
+        decision_threshold = min(1.0, fish_threshold + fish_margin)
+        fish_present = best["raw_probability"] < decision_threshold
+        fish_confidence = float(1 - best["raw_probability"])
+
+    return {
+        "fish_present": fish_present,
+        "confidence": fish_confidence if fish_present else float(1 - fish_confidence),
+        "raw_probability": float(best["raw_probability"]),
+        "variant": best["variant"],
+        "decision_threshold": float(decision_threshold),
+        "fish_positive_when": fish_positive_when,
+    }
+
+
 def show_fish_detection_window(image_path: Path, prediction: dict) -> None:
     frame = cv2.imread(str(image_path))
     if frame is None:
@@ -124,10 +185,22 @@ def show_fish_detection_window(image_path: Path, prediction: dict) -> None:
     label = "Fish detected" if prediction["fish_present"] else "No fish"
     confidence = prediction["confidence"]
     raw_prob = prediction["raw_probability"]
+    variant = prediction.get("variant", "original")
+    decision_threshold = prediction.get("decision_threshold", 0.5)
+    fish_positive_when = prediction.get("fish_positive_when", "higher")
     color = (0, 200, 0) if prediction["fish_present"] else (0, 0, 220)
 
     cv2.putText(frame, f"{label} | conf={confidence:.2f}", (12, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.75, color, 2)
     cv2.putText(frame, f"raw_prob={raw_prob:.3f}", (12, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2)
+    cv2.putText(
+        frame,
+        f"variant={variant} | th={decision_threshold:.2f} | map={fish_positive_when}",
+        (12, 86),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        color,
+        2,
+    )
     cv2.imshow("Fish Detection", frame)
     cv2.waitKey(1)
 
@@ -142,6 +215,8 @@ def run_controller(
     settle_seconds: float,
     interval_seconds: float,
     fish_threshold: float,
+    fish_margin: float,
+    fish_positive_when: str,
     visualize: bool,
     max_iterations: Optional[int],
 ) -> None:
@@ -197,6 +272,8 @@ def run_controller(
                     inference_module=inference_module,
                     fish_model=fish_model,
                     fish_threshold=fish_threshold,
+                    fish_margin=fish_margin,
+                    fish_positive_when=fish_positive_when,
                     visualize=visualize,
                 )
                 if source == "directory" and archive_dir is not None:
@@ -241,6 +318,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--interval-seconds", type=float, default=2.0)
     parser.add_argument("--fish-threshold", type=float, default=0.5)
     parser.add_argument(
+        "--fish-margin",
+        type=float,
+        default=0.15,
+        help="Extra tolerance added to fish threshold for robust multi-pass detection.",
+    )
+    parser.add_argument(
+        "--fish-positive-when",
+        choices=["higher", "lower"],
+        default="higher",
+        help="How to interpret model output for fish class.",
+    )
+    parser.add_argument(
         "--visualize",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -274,6 +363,8 @@ def main() -> int:
             settle_seconds=args.settle_seconds,
             interval_seconds=args.interval_seconds,
             fish_threshold=args.fish_threshold,
+            fish_margin=args.fish_margin,
+            fish_positive_when=args.fish_positive_when,
             visualize=args.visualize,
             max_iterations=args.max_iterations,
         )
