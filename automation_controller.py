@@ -217,6 +217,7 @@ def run_controller(
     fish_threshold: float,
     fish_margin: float,
     fish_positive_when: str,
+    exit_if_no_image: bool,
     visualize: bool,
     max_iterations: Optional[int],
 ) -> None:
@@ -263,6 +264,9 @@ def run_controller(
                         settle_seconds=settle_seconds,
                     )
                     if image_path is None:
+                        if exit_if_no_image:
+                            LOGGER.info("No image found in %s. Exiting.", input_dir)
+                            break
                         LOGGER.debug("No new image found in %s", input_dir)
                         time.sleep(interval_seconds)
                         continue
@@ -330,6 +334,12 @@ def parse_args() -> argparse.Namespace:
         help="How to interpret model output for fish class.",
     )
     parser.add_argument(
+        "--exit-if-no-image",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Exit when no image is available in input directory.",
+    )
+    parser.add_argument(
         "--visualize",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -365,6 +375,7 @@ def main() -> int:
             fish_threshold=args.fish_threshold,
             fish_margin=args.fish_margin,
             fish_positive_when=args.fish_positive_when,
+            exit_if_no_image=args.exit_if_no_image,
             visualize=args.visualize,
             max_iterations=args.max_iterations,
         )
