@@ -370,10 +370,10 @@ def analyze_image(
     visualize: bool = False,
     wait_for_key: bool = False,
     water_profile: str = "auto",
+    save_overlay_dir: str | None = None,
 ) -> dict:
     result = {
         "image_path": image_path,
-        "water_profile_requested": water_profile,
         "water_profile": water_profile,
         "tag_detected": False,
         "segmentation_mode": "none",
@@ -381,6 +381,7 @@ def analyze_image(
         "fish_count": 0,
         "lengths_mm": [],
         "continue_processing": True,
+        "overlay_path": None,
     }
 
     original_image = cv2.imread(image_path)
@@ -412,6 +413,22 @@ def analyze_image(
 
     det, det_scale = detect_apriltag(gray_candidates, original_image.shape, profile)
     if det is None:
+        if save_overlay_dir:
+            out_dir = Path(save_overlay_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out_path = out_dir / f"{Path(image_path).stem}_measurement.jpg"
+            no_tag_overlay = original_image.copy()
+            cv2.putText(
+                no_tag_overlay,
+                "No AprilTag detected",
+                (20, 40),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.9,
+                (0, 0, 255),
+                2,
+            )
+            cv2.imwrite(str(out_path), no_tag_overlay)
+            result["overlay_path"] = str(out_path)
         if visualize:
             cv2.imshow("Measurement", cv2.resize(original_image, (disp_w, disp_h)))
             if wait_for_key:
@@ -482,7 +499,7 @@ def analyze_image(
         thickness_min_px_factor_local: float,
         color_overlap_min_local: float,
     ) -> list:
-        local_measurements = []
+        prefiltered = []
         for cnt in contours:
             area = cv2.contourArea(cnt)
             if area < area_min_px or area > max_area_px:
@@ -498,7 +515,24 @@ def analyze_image(
             _, mean_s, mean_v = contour_mean_hsv(original_image, cnt)
             if (mean_s < object_min_saturation) and (mean_v < object_min_value):
                 continue
+            prefiltered.append(cnt)
 
+        if not prefiltered:
+            return []
+
+        # Merge nearby fragments to recover full fish body/tail before measurement.
+        merge_mask = np.zeros((h, w), dtype=np.uint8)
+        cv2.drawContours(merge_mask, prefiltered, -1, 255, -1)
+        merge_k = ensure_odd(max(5, int(0.16 * tag_side_px)))
+        merge_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (merge_k, merge_k))
+        merge_mask = cv2.morphologyEx(merge_mask, cv2.MORPH_CLOSE, merge_kernel, iterations=1)
+        merged_contours, _ = cv2.findContours(merge_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        local_measurements = []
+        for cnt in merged_contours:
+            area = cv2.contourArea(cnt)
+            if area < area_min_px or area > max_area_px:
+                continue
             aspect = contour_aspect_ratio(cnt)
             if aspect < aspect_min or aspect > aspect_max:
                 continue
@@ -534,8 +568,17 @@ def analyze_image(
 
             p1 = tuple(pair_px[0].astype(int))
             p2 = tuple(pair_px[1].astype(int))
-            local_measurements.append((length_mm, cnt, p1, p2))
-        local_measurements.sort(key=lambda x: x[0], reverse=True)
+            fishness = (
+                (0.35 * min(1.0, length_px / max(1.0, 1.2 * tag_side_px)))
+                + (0.25 * min(1.0, area / max(1.0, 0.45 * tag_area_px)))
+                + (0.20 * min(1.0, solidity))
+                + (0.20 * min(1.0, extent))
+            )
+            local_measurements.append((length_mm, cnt, p1, p2, fishness))
+
+        local_measurements.sort(key=lambda x: (x[4], x[0]), reverse=True)
+        local_measurements = [m for m in local_measurements if m[4] >= 0.42]
+        local_measurements = [(m[0], m[1], m[2], m[3]) for m in local_measurements]
         return local_measurements
 
     pass_params = [
@@ -566,7 +609,7 @@ def analyze_image(
     ]
 
     chosen_mode = "none"
-    chosen_contours = []
+    chosen_contour_count = 0
     measurements = []
     best_score = (-1.0, -1, -1.0)
     for pass_index, params in enumerate(pass_params):
@@ -587,7 +630,7 @@ def analyze_image(
                 best_score = score
                 measurements = local_measurements
                 chosen_mode = mode_name if pass_index == 0 else f"{mode_name}_relaxed"
-                chosen_contours = contours
+                chosen_contour_count = len(contours)
         if measurements:
             break
 
@@ -603,12 +646,9 @@ def analyze_image(
             measurements.sort(key=lambda x: x[0], reverse=True)
 
     result["segmentation_mode"] = chosen_mode
-    result["detected_contours"] = len(chosen_contours)
+    result["detected_contours"] = chosen_contour_count
     result["fish_count"] = len(measurements)
     result["lengths_mm"] = [float(item[0]) for item in measurements]
-
-    if not visualize:
-        return result
 
     overlay = original_image.copy()
     # Draw tag.
@@ -647,6 +687,16 @@ def analyze_image(
             (0, 255, 0),
             2,
         )
+
+    if save_overlay_dir:
+        out_dir = Path(save_overlay_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"{Path(image_path).stem}_measurement.jpg"
+        cv2.imwrite(str(out_path), overlay)
+        result["overlay_path"] = str(out_path)
+
+    if not visualize:
+        return result
 
     overlay_disp = cv2.resize(overlay, (disp_w, disp_h))
     cv2.imshow("Measurement", overlay_disp)

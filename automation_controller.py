@@ -1,4 +1,5 @@
 import argparse
+import csv
 import importlib.util
 import logging
 import shutil
@@ -82,6 +83,7 @@ def process_iteration(
     fish_threshold: float,
     fish_margin: float,
     fish_positive_when: str,
+    results_dir: Path,
     visualize: bool,
 ) -> None:
     LOGGER.info("Processing image: %s", image_path)
@@ -103,6 +105,12 @@ def process_iteration(
             prediction["confidence"],
             prediction["raw_probability"],
         )
+        save_result_record(
+            results_dir=results_dir,
+            image_path=image_path,
+            prediction=prediction,
+            analysis=None,
+        )
         return
 
     LOGGER.info(
@@ -111,15 +119,32 @@ def process_iteration(
         prediction["raw_probability"],
     )
 
-    analysis = homography.analyze_image(str(image_path), visualize=visualize, wait_for_key=False)
+    analysis = homography.analyze_image(
+        str(image_path),
+        visualize=visualize,
+        wait_for_key=False,
+        save_overlay_dir=str(results_dir),
+    )
     fish_count = analysis["fish_count"]
     lengths = analysis["lengths_mm"]
     if fish_count == 0:
         LOGGER.info("Fish count: 0 | lengths_mm: []")
+        save_result_record(
+            results_dir=results_dir,
+            image_path=image_path,
+            prediction=prediction,
+            analysis=analysis,
+        )
         return
 
     lengths_str = ", ".join(f"{length:.2f}" for length in lengths)
     LOGGER.info("Fish count: %d | lengths_mm: [%s]", fish_count, lengths_str)
+    save_result_record(
+        results_dir=results_dir,
+        image_path=image_path,
+        prediction=prediction,
+        analysis=analysis,
+    )
 
 
 def robust_fish_prediction(
@@ -205,6 +230,48 @@ def show_fish_detection_window(image_path: Path, prediction: dict) -> None:
     cv2.waitKey(1)
 
 
+def save_result_record(
+    results_dir: Path,
+    image_path: Path,
+    prediction: dict,
+    analysis: Optional[dict],
+) -> None:
+    results_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = results_dir / "measurements.csv"
+    file_exists = csv_path.exists()
+    with csv_path.open("a", newline="") as csv_file:
+        writer = csv.writer(csv_file)
+        if not file_exists:
+            writer.writerow(
+                [
+                    "timestamp",
+                    "image_path",
+                    "fish_present",
+                    "fish_confidence",
+                    "raw_probability",
+                    "tag_detected",
+                    "fish_count",
+                    "lengths_mm",
+                    "segmentation_mode",
+                    "overlay_path",
+                ]
+            )
+        writer.writerow(
+            [
+                datetime.now().isoformat(timespec="seconds"),
+                str(image_path),
+                bool(prediction.get("fish_present", False)),
+                float(prediction.get("confidence", 0.0)),
+                float(prediction.get("raw_probability", 0.0)),
+                bool(analysis.get("tag_detected", False)) if analysis else False,
+                int(analysis.get("fish_count", 0)) if analysis else 0,
+                ";".join(f"{v:.2f}" for v in analysis.get("lengths_mm", [])) if analysis else "",
+                analysis.get("segmentation_mode", "") if analysis else "",
+                analysis.get("overlay_path", "") if analysis else "",
+            ]
+        )
+
+
 def run_controller(
     source: str,
     camera_index: int,
@@ -218,6 +285,7 @@ def run_controller(
     fish_margin: float,
     fish_positive_when: str,
     exit_if_no_image: bool,
+    results_dir: Path,
     visualize: bool,
     max_iterations: Optional[int],
 ) -> None:
@@ -278,6 +346,7 @@ def run_controller(
                     fish_threshold=fish_threshold,
                     fish_margin=fish_margin,
                     fish_positive_when=fish_positive_when,
+                    results_dir=results_dir,
                     visualize=visualize,
                 )
                 if source == "directory" and archive_dir is not None:
@@ -307,6 +376,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=Path("captures"))
     parser.add_argument("--input-dir", type=Path, default=Path("images"))
     parser.add_argument("--archive-dir", type=Path, default=None)
+    parser.add_argument("--results-dir", type=Path, default=Path("results"))
     parser.add_argument(
         "--extensions",
         type=str,
@@ -376,6 +446,7 @@ def main() -> int:
             fish_margin=args.fish_margin,
             fish_positive_when=args.fish_positive_when,
             exit_if_no_image=args.exit_if_no_image,
+            results_dir=args.results_dir,
             visualize=args.visualize,
             max_iterations=args.max_iterations,
         )

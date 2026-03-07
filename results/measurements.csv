@@ -1,0 +1,13 @@
+timestamp,image_path,fish_present,fish_confidence,raw_probability,tag_detected,fish_count,lengths_mm,segmentation_mode,overlay_path
+2026-03-07T20:47:29,/Volumes/sandesh30/Major Project/images/image1.png,True,0.9999998807907104,0.9999998807907104,True,1,534.24,body,/Volumes/sandesh30/Major Project/results/image1_measurement.jpg
+2026-03-07T20:47:33,/Volumes/sandesh30/Major Project/images/image2.png,True,1.0,1.0,True,1,374.24,body,/Volumes/sandesh30/Major Project/results/image2_measurement.jpg
+2026-03-07T20:47:36,/Volumes/sandesh30/Major Project/images/image3.png,True,0.9997228980064392,0.9997228980064392,True,1,118.66,body,/Volumes/sandesh30/Major Project/results/image3_measurement.jpg
+2026-03-07T20:47:39,/Volumes/sandesh30/Major Project/images/image4.png,True,0.9998056292533875,0.9998056292533875,True,1,99.09,color,/Volumes/sandesh30/Major Project/results/image4_measurement.jpg
+2026-03-07T20:47:42,/Volumes/sandesh30/Major Project/images/image5.jpeg,True,1.0,1.0,True,0,,none,/Volumes/sandesh30/Major Project/results/image5_measurement.jpg
+2026-03-07T20:47:47,/Volumes/sandesh30/Major Project/images/image8.jpeg,True,1.0,1.0,True,2,245.41;150.26,color,/Volumes/sandesh30/Major Project/results/image8_measurement.jpg
+2026-03-07T20:47:55,/Volumes/sandesh30/Major Project/images/image6.jpeg,True,1.0,1.0,True,1,264.39,color,/Volumes/sandesh30/Major Project/results/image6_measurement.jpg
+2026-03-07T20:48:00,/Volumes/sandesh30/Major Project/images/image7.jpeg,True,1.0,1.0,True,0,,none,/Volumes/sandesh30/Major Project/results/image7_measurement.jpg
+2026-03-07T20:48:03,/Volumes/sandesh30/Major Project/images/image10.jpeg,True,1.0,1.0,True,4,544.04;186.47;38.42;33.32,edge_relaxed,/Volumes/sandesh30/Major Project/results/image10_measurement.jpg
+2026-03-07T20:48:06,/Volumes/sandesh30/Major Project/images/image9.jpeg,True,1.0,1.0,True,0,,none,/Volumes/sandesh30/Major Project/results/image9_measurement.jpg
+2026-03-07T20:48:09,/Volumes/sandesh30/Major Project/images/image12.jpeg,True,1.0,1.0,True,0,,none,/Volumes/sandesh30/Major Project/results/image12_measurement.jpg
+2026-03-07T20:48:12,/Volumes/sandesh30/Major Project/images/image11.jpeg,True,1.0,1.0,True,1,106.67,color,/Volumes/sandesh30/Major Project/results/image11_measurement.jpg
