@@ -84,6 +84,7 @@ def _extract_measurements(
     object_min_saturation: float,
     object_min_value: float,
     min_extent: float,
+    min_fishness: float,
 ) -> list:
     prefiltered = []
     for cnt in contours:
@@ -162,20 +163,29 @@ def _extract_measurements(
         local_measurements.append((length_mm, cnt, p1, p2, fishness))
 
     local_measurements.sort(key=lambda x: (x[4], x[0]), reverse=True)
-    local_measurements = [m for m in local_measurements if m[4] >= 0.42]
+    local_measurements = [m for m in local_measurements if m[4] >= min_fishness]
     return [(m[0], m[1], m[2], m[3]) for m in local_measurements]
 
 
-def analyze_image(
+def _score_analysis_result(result: dict) -> tuple[float, int, float]:
+    lengths = result.get("lengths_mm", [])
+    if not result.get("tag_detected"):
+        return (-1.0, -1, -1.0)
+    if not lengths:
+        return (0.0, 0, 0.0)
+    max_len = float(max(lengths))
+    total_len = float(sum(lengths))
+    return (max_len, int(result.get("fish_count", 0)), total_len)
+
+
+def _analyze_with_profile(
+    original_image: np.ndarray,
     image_path: str,
-    visualize: bool = False,
-    wait_for_key: bool = False,
-    water_profile: str = "auto",
-    save_overlay_dir: str | None = None,
+    profile_name: str,
 ) -> dict:
     result = {
         "image_path": image_path,
-        "water_profile": water_profile,
+        "water_profile": profile_name,
         "tag_detected": False,
         "segmentation_mode": "none",
         "detected_contours": 0,
@@ -183,20 +193,14 @@ def analyze_image(
         "lengths_mm": [],
         "continue_processing": True,
         "overlay_path": None,
+        "overlay_image": original_image.copy(),
+        "tag_id": None,
+        "tag_corners": None,
+        "measurements": [],
     }
 
-    original_image = cv2.imread(image_path)
-    if original_image is None:
-        raise FileNotFoundError(f"Image not found: {image_path}")
-
-    selected_profile_name = select_water_profile_auto(original_image) if water_profile == "auto" else water_profile
-    profile = get_profile(selected_profile_name)
-    result["water_profile"] = selected_profile_name
-
+    profile = get_profile(profile_name)
     h, w = original_image.shape[:2]
-    disp_scale = min(MAX_WIDTH / w, MAX_HEIGHT / h, 1.0)
-    disp_w, disp_h = int(w * disp_scale), int(h * disp_scale)
-
     gray_raw = cv2.cvtColor(original_image, cv2.COLOR_BGR2GRAY)
     gray_eq = cv2.equalizeHist(gray_raw)
     gray_preprocessed = preprocess_gray(gray_raw, profile)
@@ -211,35 +215,12 @@ def analyze_image(
 
     det, det_scale = detect_apriltag(gray_candidates, original_image.shape, profile)
     if det is None:
-        if save_overlay_dir:
-            out_dir = Path(save_overlay_dir)
-            out_dir.mkdir(parents=True, exist_ok=True)
-            out_path = out_dir / f"{Path(image_path).stem}_measurement.jpg"
-            no_tag_overlay = original_image.copy()
-            cv2.putText(
-                no_tag_overlay,
-                "No AprilTag detected",
-                (20, 40),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.9,
-                (0, 0, 255),
-                2,
-            )
-            cv2.imwrite(str(out_path), no_tag_overlay)
-            result["overlay_path"] = str(out_path)
-        if visualize:
-            cv2.imshow("Measurement", cv2.resize(original_image, (disp_w, disp_h)))
-            if wait_for_key:
-                key = cv2.waitKey(0) & 0xFF
-                if key == ord("q"):
-                    result["continue_processing"] = False
-            else:
-                cv2.waitKey(1)
-            cv2.destroyAllWindows()
         return result
 
     corners = det.corners.astype(np.float32) / float(det_scale)
     result["tag_detected"] = True
+    result["tag_id"] = int(det.tag_id)
+    result["tag_corners"] = corners
 
     dst_mm = np.array(
         [[0, 0], [TAG_SIZE_MM, 0], [TAG_SIZE_MM, TAG_SIZE_MM], [0, TAG_SIZE_MM]],
@@ -296,6 +277,8 @@ def analyze_image(
             min_length_px_factor,
             min_thickness_px_factor,
             0.0,
+            min_extent,
+            0.42,
         ),
         (
             0.45 * min_area_px_dynamic,
@@ -308,6 +291,22 @@ def analyze_image(
             0.75 * min_length_px_factor,
             0.70 * min_thickness_px_factor,
             0.0,
+            0.85 * min_extent,
+            0.38,
+        ),
+        (
+            0.18 * min_area_px_dynamic,
+            0.60 * min_aspect_ratio,
+            1.50 * max_aspect_ratio,
+            0.38 * min_perimeter_px,
+            0.55 * min_solidity,
+            0.55 * min_length_mm,
+            max_length_mm,
+            0.50 * min_length_px_factor,
+            0.45 * min_thickness_px_factor,
+            0.0,
+            0.70 * min_extent,
+            0.30,
         ),
     ]
 
@@ -317,7 +316,7 @@ def analyze_image(
     best_score = (-1.0, -1, -1.0)
     for pass_index, params in enumerate(pass_params):
         for mode_name, contours, mode_overlap_min in contour_sets:
-            params_with_mode = params[:-1] + (max(params[-1], mode_overlap_min),)
+            params_with_mode = params[:9] + (max(params[9], mode_overlap_min),) + params[10:]
             local_measurements = _extract_measurements(
                 original_image,
                 contours,
@@ -331,10 +330,10 @@ def analyze_image(
                 tag_area_px,
                 max_area_px,
                 bg_area_px,
-                *params_with_mode,
+                *params_with_mode[:10],
                 object_min_saturation,
                 object_min_value,
-                min_extent,
+                *params_with_mode[10:],
             )
             if local_measurements:
                 max_len = float(local_measurements[0][0])
@@ -364,6 +363,7 @@ def analyze_image(
     result["detected_contours"] = chosen_contour_count
     result["fish_count"] = len(measurements)
     result["lengths_mm"] = [float(item[0]) for item in measurements]
+    result["measurements"] = measurements
 
     overlay = original_image.copy()
     for i in range(4):
@@ -401,6 +401,106 @@ def analyze_image(
             (0, 255, 0),
             2,
         )
+
+    result["overlay_image"] = overlay
+    return result
+
+
+def analyze_image(
+    image_path: str,
+    visualize: bool = False,
+    wait_for_key: bool = False,
+    water_profile: str = "auto",
+    save_overlay_dir: str | None = None,
+) -> dict:
+    result = {
+        "image_path": image_path,
+        "water_profile": water_profile,
+        "tag_detected": False,
+        "segmentation_mode": "none",
+        "detected_contours": 0,
+        "fish_count": 0,
+        "lengths_mm": [],
+        "continue_processing": True,
+        "overlay_path": None,
+    }
+
+    original_image = cv2.imread(image_path)
+    if original_image is None:
+        raise FileNotFoundError(f"Image not found: {image_path}")
+
+    h, w = original_image.shape[:2]
+    disp_scale = min(MAX_WIDTH / w, MAX_HEIGHT / h, 1.0)
+    disp_w, disp_h = int(w * disp_scale), int(h * disp_scale)
+
+    selected_profile_name = select_water_profile_auto(original_image) if water_profile == "auto" else water_profile
+    candidate_profile_names = (
+        [selected_profile_name, "clear", "murky"]
+        if water_profile == "auto"
+        else [water_profile]
+    )
+    seen_profiles = []
+    for profile_name in candidate_profile_names:
+        if profile_name not in seen_profiles:
+            seen_profiles.append(profile_name)
+
+    candidate_results = [_analyze_with_profile(original_image, image_path, profile_name) for profile_name in seen_profiles]
+
+    if water_profile != "auto":
+        best_result = max(candidate_results, key=_score_analysis_result)
+    else:
+        auto_result = next(result for result in candidate_results if result["water_profile"] == selected_profile_name)
+        actual_tag_results = [
+            result
+            for result in candidate_results
+            if result.get("tag_detected") and int(result.get("tag_id", -1) or -1) >= 0
+        ]
+
+        if auto_result["lengths_mm"] and int(auto_result.get("tag_id", -1) or -1) >= 0:
+            best_result = auto_result
+        elif actual_tag_results:
+            best_result = max(actual_tag_results, key=_score_analysis_result)
+        else:
+            best_result = max(candidate_results, key=_score_analysis_result)
+    result.update(
+        {
+            "water_profile": best_result["water_profile"],
+            "tag_detected": best_result["tag_detected"],
+            "segmentation_mode": best_result["segmentation_mode"],
+            "detected_contours": best_result["detected_contours"],
+            "fish_count": best_result["fish_count"],
+            "lengths_mm": best_result["lengths_mm"],
+        }
+    )
+
+    overlay = best_result["overlay_image"] if best_result["tag_detected"] else original_image.copy()
+    if not best_result["tag_detected"]:
+        if save_overlay_dir:
+            out_dir = Path(save_overlay_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out_path = out_dir / f"{Path(image_path).stem}_measurement.jpg"
+            no_tag_overlay = overlay.copy()
+            cv2.putText(
+                no_tag_overlay,
+                "No AprilTag detected",
+                (20, 40),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.9,
+                (0, 0, 255),
+                2,
+            )
+            cv2.imwrite(str(out_path), no_tag_overlay)
+            result["overlay_path"] = str(out_path)
+        if visualize:
+            cv2.imshow("Measurement", cv2.resize(original_image, (disp_w, disp_h)))
+            if wait_for_key:
+                key = cv2.waitKey(0) & 0xFF
+                if key == ord("q"):
+                    result["continue_processing"] = False
+            else:
+                cv2.waitKey(1)
+            cv2.destroyAllWindows()
+        return result
 
     if save_overlay_dir:
         out_dir = Path(save_overlay_dir)
@@ -513,4 +613,3 @@ def process_directory_loop(
             time.sleep(interval_seconds)
     except KeyboardInterrupt:
         print("\nStopped directory watcher.")
-

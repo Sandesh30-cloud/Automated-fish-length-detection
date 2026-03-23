@@ -42,3 +42,15 @@ timestamp,image_path,fish_present,fish_confidence,raw_probability,tag_detected,f
 2026-03-17T21:18:16,/Volumes/sandesh30/Major Project/images/image5.jpeg,True,1.0,1.0,True,0,,none,/Volumes/sandesh30/Major Project/results/image5_measurement.jpg
 2026-03-17T21:18:19,/Volumes/sandesh30/Major Project/images/image8.jpeg,True,1.0,1.0,True,2,241.32;145.90,color,/Volumes/sandesh30/Major Project/results/image8_measurement.jpg
 2026-03-17T21:18:22,/Volumes/sandesh30/Major Project/images/image6.jpeg,True,1.0,1.0,True,1,258.72,color,/Volumes/sandesh30/Major Project/results/image6_measurement.jpg
+2026-03-17T21:41:21,/Volumes/sandesh30/Major Project/images/image1.png,True,0.9999998807907104,0.9999998807907104,True,1,498.65,body,/Volumes/sandesh30/Major Project/results/image1_measurement.jpg
+2026-03-17T21:41:35,/Volumes/sandesh30/Major Project/images/image2.png,True,1.0,1.0,True,1,362.05,body,/Volumes/sandesh30/Major Project/results/image2_measurement.jpg
+2026-03-17T21:41:42,/Volumes/sandesh30/Major Project/images/image3.png,True,0.9997228980064392,0.9997228980064392,True,1,145.60,edge,/Volumes/sandesh30/Major Project/results/image3_measurement.jpg
+2026-03-17T21:41:46,/Volumes/sandesh30/Major Project/images/image4.png,True,0.9998056292533875,0.9998056292533875,True,1,95.60,color,/Volumes/sandesh30/Major Project/results/image4_measurement.jpg
+2026-03-17T21:41:49,/Volumes/sandesh30/Major Project/images/image5.jpeg,True,1.0,1.0,True,0,,none,/Volumes/sandesh30/Major Project/results/image5_measurement.jpg
+2026-03-17T21:41:52,/Volumes/sandesh30/Major Project/images/image8.jpeg,True,1.0,1.0,True,2,241.32;145.90,color,/Volumes/sandesh30/Major Project/results/image8_measurement.jpg
+2026-03-17T21:42:01,/Volumes/sandesh30/Major Project/images/image6.jpeg,True,1.0,1.0,True,1,258.72,color,/Volumes/sandesh30/Major Project/results/image6_measurement.jpg
+2026-03-17T21:42:06,/Volumes/sandesh30/Major Project/images/image7.jpeg,True,1.0,1.0,True,1,624.59,color,/Volumes/sandesh30/Major Project/results/image7_measurement.jpg
+2026-03-17T21:42:10,/Volumes/sandesh30/Major Project/images/image10.jpeg,True,1.0,1.0,True,2,101.42;98.95,edge,/Volumes/sandesh30/Major Project/results/image10_measurement.jpg
+2026-03-17T21:42:13,/Volumes/sandesh30/Major Project/images/image9.jpeg,True,1.0,1.0,True,1,26.52,color_relaxed,/Volumes/sandesh30/Major Project/results/image9_measurement.jpg
+2026-03-17T21:42:22,/Volumes/sandesh30/Major Project/images/image12.jpeg,True,1.0,1.0,True,1,36.27,color_relaxed,/Volumes/sandesh30/Major Project/results/image12_measurement.jpg
+2026-03-17T21:42:26,/Volumes/sandesh30/Major Project/images/image11.jpeg,True,1.0,1.0,True,1,100.00,color,/Volumes/sandesh30/Major Project/results/image11_measurement.jpg
