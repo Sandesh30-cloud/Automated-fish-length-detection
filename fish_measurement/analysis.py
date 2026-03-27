@@ -27,6 +27,7 @@ from .contours import (
     detect_adaptive_body_contours,
     detect_color_object_contours,
     detect_object_contours,
+    detect_panel_object_contours,
     preprocess_gray,
 )
 
@@ -58,6 +59,62 @@ def major_axis_from_points(points_xy: np.ndarray):
     return length_mm, p1.astype(np.float32), p2.astype(np.float32)
 
 
+def detect_measurement_panel(frame: np.ndarray, ignore_mask: np.ndarray) -> tuple[np.ndarray | None, tuple[int, int, int, int] | None]:
+    h, w = frame.shape[:2]
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+    # Screenshot-style captures often contain a bright fish-photo panel inside a dark screen.
+    panel_seed = (((hsv[:, :, 1] > 35) & (hsv[:, :, 2] > 60)) | (gray > 80)).astype(np.uint8) * 255
+    panel_seed[ignore_mask > 0] = 0
+    panel_seed = cv2.morphologyEx(
+        panel_seed,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15)),
+        iterations=2,
+    )
+    panel_seed = cv2.morphologyEx(
+        panel_seed,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7)),
+        iterations=1,
+    )
+
+    contours, _ = cv2.findContours(panel_seed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    best_mask = None
+    best_bounds = None
+    best_score = -1.0
+
+    for cnt in contours:
+        x, y, bw, bh = cv2.boundingRect(cnt)
+        area = float(cv2.contourArea(cnt))
+        box_area = float(bw * bh)
+        if box_area <= 1.0:
+            continue
+        area_ratio = area / float(w * h)
+        extent = area / box_area
+        aspect = bw / max(1.0, float(bh))
+        touches_border = x <= 4 or y <= 4 or (x + bw) >= (w - 4) or (y + bh) >= (h - 4)
+
+        if touches_border:
+            continue
+        if area_ratio < 0.08 or area_ratio > 0.70:
+            continue
+        if extent < 0.72:
+            continue
+        if aspect < 0.25 or aspect > 3.5:
+            continue
+
+        score = area_ratio + (0.35 * extent)
+        if score > best_score:
+            best_score = score
+            best_mask = np.zeros((h, w), dtype=np.uint8)
+            cv2.drawContours(best_mask, [cnt], -1, 255, -1)
+            best_bounds = (x, y, bw, bh)
+
+    return best_mask, best_bounds
+
+
 def _extract_measurements(
     original_image: np.ndarray,
     contours: list,
@@ -85,11 +142,16 @@ def _extract_measurements(
     object_min_value: float,
     min_extent: float,
     min_fishness: float,
+    panel_mask: np.ndarray | None = None,
+    panel_area_px: float | None = None,
 ) -> list:
+    hsv_image = cv2.cvtColor(original_image, cv2.COLOR_BGR2HSV)
     prefiltered = []
     for cnt in contours:
         area = cv2.contourArea(cnt)
         if area < area_min_px or area > max_area_px:
+            continue
+        if panel_area_px is not None and area > (0.65 * panel_area_px):
             continue
         if area > bg_area_px:
             continue
@@ -97,9 +159,11 @@ def _extract_measurements(
             continue
         if contour_overlap_ratio_with_mask(cnt, ignore_mask) > 0.02:
             continue
+        if panel_mask is not None and contour_overlap_ratio_with_mask(cnt, panel_mask) < 0.55:
+            continue
         if contour_overlap_ratio_with_mask(cnt, fish_color_mask) < color_overlap_min_local:
             continue
-        _, mean_s, mean_v = contour_mean_hsv(original_image, cnt)
+        _, mean_s, mean_v = contour_mean_hsv(hsv_image, cnt, hsv_ready=True)
         if (mean_s < object_min_saturation) and (mean_v < object_min_value):
             continue
         prefiltered.append(cnt)
@@ -118,6 +182,8 @@ def _extract_measurements(
     for cnt in merged_contours:
         area = cv2.contourArea(cnt)
         if area < area_min_px or area > max_area_px:
+            continue
+        if panel_area_px is not None and area > (0.65 * panel_area_px):
             continue
         aspect = contour_aspect_ratio(cnt)
         if aspect < aspect_min or aspect > aspect_max:
@@ -240,15 +306,23 @@ def _analyze_with_profile(
         y_start = int(h * (1.0 - bottom_ignore_ratio))
         ignore_mask[y_start:, :] = 255
 
+    panel_mask, _ = detect_measurement_panel(original_image, ignore_mask)
+    panel_area_px = float(np.count_nonzero(panel_mask)) if panel_mask is not None else None
+    detection_frame = original_image.copy()
+    if panel_mask is not None:
+        detection_frame[panel_mask == 0] = 0
+
     max_area_px = MAX_OBJECT_AREA_RATIO * (w * h)
     bg_area_px = MAX_BACKGROUND_AREA_RATIO * (w * h)
     min_color_overlap_ratio = float(profile["min_color_overlap_ratio"])
     contour_sets = [
-        ("edge", detect_object_contours(original_image, ignore_mask, profile), 0.0),
-        ("color", detect_color_object_contours(original_image, ignore_mask, profile), min_color_overlap_ratio),
-        ("body", detect_adaptive_body_contours(original_image, ignore_mask, profile), 0.0),
+        ("edge", detect_object_contours(detection_frame, ignore_mask, profile), 0.0),
+        ("color", detect_color_object_contours(detection_frame, ignore_mask, profile), min_color_overlap_ratio),
+        ("body", detect_adaptive_body_contours(detection_frame, ignore_mask, profile), 0.0),
     ]
-    fish_color_mask = build_fish_color_mask(original_image, ignore_mask, profile)
+    if panel_mask is not None:
+        contour_sets.insert(0, ("panel", detect_panel_object_contours(original_image, panel_mask, ignore_mask, profile), 0.0))
+    fish_color_mask = build_fish_color_mask(detection_frame, ignore_mask, profile)
 
     min_object_area_px = float(profile["min_object_area_px"])
     min_aspect_ratio = float(profile["min_aspect_ratio"])
@@ -310,10 +384,14 @@ def _analyze_with_profile(
         ),
     ]
 
+    pass_labels = {0: "", 1: "_relaxed", 2: "_ultra"}
+
     chosen_mode = "none"
     chosen_contour_count = 0
     measurements = []
     best_score = (-1.0, -1, -1.0)
+    chosen_pass_index = None
+    candidate_options = []
     for pass_index, params in enumerate(pass_params):
         for mode_name, contours, mode_overlap_min in contour_sets:
             params_with_mode = params[:9] + (max(params[9], mode_overlap_min),) + params[10:]
@@ -334,12 +412,23 @@ def _analyze_with_profile(
                 object_min_saturation,
                 object_min_value,
                 *params_with_mode[10:],
+                panel_mask=panel_mask,
+                panel_area_px=panel_area_px,
             )
+            if local_measurements:
+                candidate_options.append(
+                    {
+                        "mode_name": mode_name,
+                        "pass_index": pass_index,
+                        "measurements": local_measurements,
+                        "contour_count": len(contours),
+                    }
+                )
             if local_measurements:
                 max_len = float(local_measurements[0][0])
                 total_len = float(sum(item[0] for item in local_measurements))
-                strict_bonus = 1000.0 if pass_index == 0 else 0.0
                 area_sum = float(sum(cv2.contourArea(item[1]) for item in local_measurements))
+                strict_bonus = 1000.0 if pass_index == 0 else 0.0
                 score = (strict_bonus + max_len, len(local_measurements), total_len + 0.0005 * area_sum)
             else:
                 score = (-1.0, -1, -1.0)
@@ -347,10 +436,34 @@ def _analyze_with_profile(
             if score > best_score:
                 best_score = score
                 measurements = local_measurements
-                chosen_mode = mode_name if pass_index == 0 else f"{mode_name}_relaxed"
+                chosen_mode = f"{mode_name}{pass_labels.get(pass_index, '_relaxed')}"
                 chosen_contour_count = len(contours)
-        if measurements:
-            break
+                chosen_pass_index = pass_index
+
+    if measurements and chosen_pass_index == 0:
+        base_max_len = float(measurements[0][0])
+        base_max_area = float(max(cv2.contourArea(item[1]) for item in measurements))
+        fallback_candidates = [
+            option
+            for option in candidate_options
+            if option["pass_index"] >= 1 and option["mode_name"] in {"color", "panel"}
+        ]
+        for option in fallback_candidates:
+            alt_measurements = option["measurements"]
+            alt_max_len = float(alt_measurements[0][0])
+            alt_max_area = float(max(cv2.contourArea(item[1]) for item in alt_measurements))
+            if (
+                alt_max_len >= max(base_max_len * 1.8, base_max_len + 80.0)
+                and alt_max_len <= (base_max_len * 3.5)
+                and (
+                    alt_max_area >= (base_max_area * 1.8)
+                    or (chosen_mode.startswith("edge") and option["mode_name"] == "color" and alt_max_len >= (base_max_len * 2.4))
+                )
+            ):
+                measurements = alt_measurements
+                chosen_mode = f"{option['mode_name']}{pass_labels.get(option['pass_index'], '_relaxed')}"
+                chosen_contour_count = option["contour_count"]
+                break
 
     if measurements:
         contour_areas = [cv2.contourArea(item[1]) for item in measurements]
@@ -434,34 +547,30 @@ def analyze_image(
     disp_w, disp_h = int(w * disp_scale), int(h * disp_scale)
 
     selected_profile_name = select_water_profile_auto(original_image) if water_profile == "auto" else water_profile
-    candidate_profile_names = (
-        [selected_profile_name, "clear", "murky"]
-        if water_profile == "auto"
-        else [water_profile]
-    )
-    seen_profiles = []
-    for profile_name in candidate_profile_names:
-        if profile_name not in seen_profiles:
-            seen_profiles.append(profile_name)
-
-    candidate_results = [_analyze_with_profile(original_image, image_path, profile_name) for profile_name in seen_profiles]
-
     if water_profile != "auto":
-        best_result = max(candidate_results, key=_score_analysis_result)
+        best_result = _analyze_with_profile(original_image, image_path, water_profile)
     else:
-        auto_result = next(result for result in candidate_results if result["water_profile"] == selected_profile_name)
-        actual_tag_results = [
-            result
-            for result in candidate_results
-            if result.get("tag_detected") and int(result.get("tag_id", -1) or -1) >= 0
-        ]
-
-        if auto_result["lengths_mm"] and int(auto_result.get("tag_id", -1) or -1) >= 0:
+        auto_result = _analyze_with_profile(original_image, image_path, selected_profile_name)
+        if auto_result["fish_count"] > 0:
             best_result = auto_result
-        elif actual_tag_results:
-            best_result = max(actual_tag_results, key=_score_analysis_result)
         else:
-            best_result = max(candidate_results, key=_score_analysis_result)
+            fallback_profiles = [name for name in ("clear", "murky") if name != selected_profile_name]
+            candidate_results = [auto_result] + [
+                _analyze_with_profile(original_image, image_path, profile_name)
+                for profile_name in fallback_profiles
+            ]
+            actual_tag_results = [
+                result
+                for result in candidate_results
+                if result.get("tag_detected") and int(result.get("tag_id", -1) or -1) >= 0
+            ]
+
+            if auto_result["lengths_mm"] and int(auto_result.get("tag_id", -1) or -1) >= 0:
+                best_result = auto_result
+            elif actual_tag_results:
+                best_result = max(actual_tag_results, key=_score_analysis_result)
+            else:
+                best_result = max(candidate_results, key=_score_analysis_result)
     result.update(
         {
             "water_profile": best_result["water_profile"],

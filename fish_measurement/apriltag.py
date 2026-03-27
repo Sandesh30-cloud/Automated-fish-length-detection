@@ -45,7 +45,6 @@ def _tag_geometry_metrics(corners: np.ndarray) -> tuple[float, float, float]:
 
 def _tag_geometry_score(corners: np.ndarray) -> float:
     _, area_ratio, side_ratio = _tag_geometry_metrics(corners)
-    # Real tag quads stay reasonably square even with perspective skew.
     area_term = max(0.0, 1.0 - (abs(area_ratio - 1.0) / 1.2))
     side_term = max(0.0, 1.0 - ((side_ratio - 1.0) / 4.0))
     return (0.65 * area_term) + (0.35 * side_term)
@@ -78,7 +77,9 @@ def _detect_tag_quad_fallback(gray: np.ndarray, image_shape: tuple, min_side_px:
 
         corners = _order_quad_points(approx.reshape(4, 2))
         side_px, area_ratio, side_ratio = _tag_geometry_metrics(corners)
-        if side_px < min_side_px or area_ratio < 0.45 or side_ratio > 2.8:
+        x, y, w_box, h_box = cv2.boundingRect(corners.astype(np.int32))
+        touches_border = x <= 1 or y <= 1 or (x + w_box) >= (width - 1) or (y + h_box) >= (height - 1)
+        if side_px < min_side_px or area_ratio < 0.45 or side_ratio > 2.8 or touches_border:
             continue
 
         dst = np.array([[0, 0], [119, 0], [119, 119], [0, 119]], dtype=np.float32)
@@ -119,57 +120,90 @@ def _detect_tag_quad_fallback(gray: np.ndarray, image_shape: tuple, min_side_px:
 
 
 def detect_apriltag(gray_candidates: list, image_shape: tuple, profile: dict) -> tuple:
-    best_detection = None
-    best_scale = 1.0
-    best_score = -1e9
-
     height, width = image_shape[:2]
     x_limit = float(profile["tag_expected_x_max_ratio"]) * width
     y_limit = float(profile["tag_expected_y_min_ratio"]) * height
     location_weight = float(profile["tag_location_weight"])
     min_side_px = float(profile["tag_min_side_px"])
 
-    for gray, scale in gray_candidates:
-        thresholded = cv2.adaptiveThreshold(
-            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 2
-        )
-        _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        inverted = cv2.bitwise_not(thresholded)
-        detection_inputs = [gray, thresholded, inverted, otsu]
+    def search_candidates(candidate_subset: list, include_otsu: bool) -> tuple:
+        best_detection = None
+        best_scale = 1.0
+        best_score = -1e9
+        best_in_region_detection = None
+        best_in_region_scale = 1.0
+        best_in_region_score = -1e9
 
-        for image in detection_inputs:
-            for detector in APRILTAG_DETECTORS:
-                detections = detector.detect(image)
-                for det in detections:
-                    corners = det.corners.astype(np.float32) / float(scale)
-                    side_px, area_ratio, side_ratio = _tag_geometry_metrics(corners)
-                    if side_px < min_side_px:
-                        continue
-                    center = np.mean(corners, axis=0)
-                    in_expected_region = center[0] <= x_limit and center[1] >= y_limit
+        for gray, scale in candidate_subset:
+            thresholded = cv2.adaptiveThreshold(
+                gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 2
+            )
+            detection_inputs = [gray, thresholded, cv2.bitwise_not(thresholded)]
+            if include_otsu:
+                _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                detection_inputs.append(otsu)
 
-                    hamming = int(getattr(det, "hamming", 99))
-                    decision_margin = float(getattr(det, "decision_margin", 0.0))
-                    score = decision_margin - (20.0 * hamming) + (0.04 * side_px)
-                    score += location_weight if in_expected_region else (-0.6 * location_weight)
-                    score += 24.0 * _tag_geometry_score(corners)
-                    score -= 80.0 * max(0.0, 0.18 - area_ratio)
-                    score -= 6.0 * max(0.0, side_ratio - 3.5)
+            for image in detection_inputs:
+                for detector in APRILTAG_DETECTORS:
+                    detections = detector.detect(image)
+                    for det in detections:
+                        corners = det.corners.astype(np.float32) / float(scale)
+                        side_px, area_ratio, side_ratio = _tag_geometry_metrics(corners)
+                        if side_px < min_side_px:
+                            continue
+                        center = np.mean(corners, axis=0)
+                        in_expected_region = center[0] <= x_limit and center[1] >= y_limit
 
-                    if score > best_score:
-                        best_score = score
-                        best_detection = det
-                        best_scale = float(scale)
+                        hamming = int(getattr(det, "hamming", 99))
+                        decision_margin = float(getattr(det, "decision_margin", 0.0))
+                        score = decision_margin - (20.0 * hamming) + (0.04 * side_px)
+                        score += location_weight if in_expected_region else (-0.6 * location_weight)
+                        score += 24.0 * _tag_geometry_score(corners)
+                        score -= 80.0 * max(0.0, 0.18 - area_ratio)
+                        score -= 6.0 * max(0.0, side_ratio - 3.5)
 
-    if best_detection is not None:
-        corners = best_detection.corners.astype(np.float32) / float(best_scale)
-        _, area_ratio, side_ratio = _tag_geometry_metrics(corners)
-        if area_ratio >= 0.18 and side_ratio <= 3.8:
-            return best_detection, best_scale
+                        if score > best_score:
+                            best_score = score
+                            best_detection = det
+                            best_scale = float(scale)
+                        if (
+                            in_expected_region
+                            and area_ratio >= 0.45
+                            and side_ratio <= 3.8
+                            and score > best_in_region_score
+                        ):
+                            best_in_region_score = score
+                            best_in_region_detection = det
+                            best_in_region_scale = float(scale)
+
+        if best_in_region_detection is not None:
+            return best_in_region_detection, best_in_region_scale
+        if best_detection is not None:
+            corners = best_detection.corners.astype(np.float32) / float(best_scale)
+            _, area_ratio, side_ratio = _tag_geometry_metrics(corners)
+            if area_ratio >= 0.45 and side_ratio <= 3.8:
+                return best_detection, best_scale
+        return None, 1.0
+
+    base_candidates = [(gray, scale) for gray, scale in gray_candidates if abs(float(scale) - 1.0) < 1e-6]
+    scaled_candidates = [(gray, scale) for gray, scale in gray_candidates if abs(float(scale) - 1.0) >= 1e-6]
+
+    det, scale = search_candidates(base_candidates, include_otsu=False)
+    if det is not None:
+        return det, scale
+
+    if scaled_candidates:
+        det, scale = search_candidates(scaled_candidates, include_otsu=False)
+        if det is not None:
+            return det, scale
+
+    det, scale = search_candidates(gray_candidates, include_otsu=True)
+    if det is not None:
+        return det, scale
 
     for gray, _ in gray_candidates:
         fallback_detection = _detect_tag_quad_fallback(gray, image_shape, min_side_px)
         if fallback_detection is not None:
             return fallback_detection, 1.0
 
-    return best_detection, best_scale
+    return None, 1.0

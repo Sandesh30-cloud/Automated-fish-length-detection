@@ -75,8 +75,8 @@ def contour_extent(contour: np.ndarray) -> float:
     return float(area / box_area)
 
 
-def contour_mean_hsv(frame: np.ndarray, contour: np.ndarray) -> tuple:
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+def contour_mean_hsv(frame_or_hsv: np.ndarray, contour: np.ndarray, hsv_ready: bool = False) -> tuple:
+    hsv = frame_or_hsv if hsv_ready else cv2.cvtColor(frame_or_hsv, cv2.COLOR_BGR2HSV)
     mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
     cv2.drawContours(mask, [contour], -1, 255, -1)
     mean_h, mean_s, mean_v, _ = cv2.mean(hsv, mask=mask)
@@ -166,3 +166,42 @@ def detect_color_object_contours(frame: np.ndarray, ignore_mask: np.ndarray, pro
     contours, _ = cv2.findContours(color_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     return contours
 
+
+def detect_panel_object_contours(
+    frame: np.ndarray,
+    panel_mask: np.ndarray | None,
+    ignore_mask: np.ndarray,
+    profile: dict,
+) -> list:
+    if panel_mask is None or np.count_nonzero(panel_mask) == 0:
+        return []
+
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    value = hsv[:, :, 2]
+    saturation = hsv[:, :, 1]
+    panel_values = value[panel_mask > 0]
+    if panel_values.size == 0:
+        return []
+
+    value_cutoff = max(30.0, float(np.percentile(panel_values, 28)))
+    saturation_cutoff = max(18, int(float(profile["color_s_min"]) * 0.5))
+    dark_object_mask = (
+        (panel_mask > 0)
+        & (value <= value_cutoff)
+        & (saturation > saturation_cutoff)
+    ).astype(np.uint8) * 255
+    dark_object_mask[ignore_mask > 0] = 0
+    dark_object_mask = cv2.morphologyEx(
+        dark_object_mask,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),
+        iterations=1,
+    )
+    dark_object_mask = cv2.morphologyEx(
+        dark_object_mask,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11)),
+        iterations=2,
+    )
+    contours, _ = cv2.findContours(dark_object_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    return contours

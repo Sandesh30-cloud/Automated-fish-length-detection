@@ -25,6 +25,37 @@ def configure_logging(level: str = "INFO") -> None:
     )
 
 
+def parse_extensions_csv(extensions: str) -> Tuple[str, ...]:
+    parsed = tuple(
+        ext.strip().lower() if ext.strip().startswith(".") else f".{ext.strip().lower()}"
+        for ext in extensions.split(",")
+        if ext.strip()
+    )
+    if not parsed:
+        raise ValueError("No valid image extensions provided in --extensions")
+    return parsed
+
+
+def validate_runtime_args(args: argparse.Namespace) -> None:
+    if args.settle_seconds < 0:
+        raise ValueError("--settle-seconds must be >= 0")
+    if args.interval_seconds <= 0:
+        raise ValueError("--interval-seconds must be > 0")
+    if not 0.0 <= args.fish_threshold <= 1.0:
+        raise ValueError("--fish-threshold must be between 0 and 1")
+    if not 0.0 <= args.fish_margin <= 1.0:
+        raise ValueError("--fish-margin must be between 0 and 1")
+    if args.max_iterations is not None and args.max_iterations <= 0:
+        raise ValueError("--max-iterations must be > 0 when provided")
+    if args.source == "camera" and args.archive_dir is not None:
+        raise ValueError("--archive-dir is only supported with --source directory")
+    if args.source == "directory" and args.archive_dir is not None:
+        if args.archive_dir.resolve() == args.input_dir.resolve():
+            raise ValueError("--archive-dir must be different from --input-dir")
+    if args.results_dir.resolve() == args.input_dir.resolve():
+        raise ValueError("--results-dir must be different from --input-dir")
+
+
 def load_module_from_path(module_name: str, module_path: Path) -> ModuleType:
     spec = importlib.util.spec_from_file_location(module_name, module_path)
     if spec is None or spec.loader is None:
@@ -50,7 +81,6 @@ def capture_image(camera: cv2.VideoCapture, output_dir: Path) -> Path:
 
 def get_next_image_from_directory(
     input_dir: Path,
-    processed_files: Set[Path],
     allowed_extensions: Tuple[str, ...],
     settle_seconds: float,
 ) -> Optional[Path]:
@@ -61,8 +91,6 @@ def get_next_image_from_directory(
     now = time.time()
     candidates = sorted(input_dir.iterdir(), key=lambda p: p.stat().st_mtime)
     for image_path in candidates:
-        if image_path in processed_files:
-            continue
         if not image_path.is_file():
             continue
         if image_path.name.startswith(".") or image_path.name.startswith("._"):
@@ -71,9 +99,22 @@ def get_next_image_from_directory(
             continue
         if (now - image_path.stat().st_mtime) < settle_seconds:
             continue
-        processed_files.add(image_path)
         return image_path
     return None
+
+
+def get_archive_target_path(archive_dir: Path, image_path: Path) -> Path:
+    target = archive_dir / image_path.name
+    if not target.exists():
+        return target
+
+    stem = image_path.stem
+    suffix = image_path.suffix
+    for index in range(1, 10_000):
+        candidate = archive_dir / f"{stem}_{index:04d}{suffix}"
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError(f"Could not find a free archive filename for {image_path.name}")
 
 
 def process_iteration(
@@ -270,6 +311,7 @@ def save_result_record(
                 analysis.get("overlay_path", "") if analysis else "",
             ]
         )
+        csv_file.flush()
 
 
 def run_controller(
@@ -327,7 +369,6 @@ def run_controller(
                 else:
                     image_path = get_next_image_from_directory(
                         input_dir=input_dir,
-                        processed_files=processed_files,
                         allowed_extensions=allowed_extensions,
                         settle_seconds=settle_seconds,
                     )
@@ -349,8 +390,10 @@ def run_controller(
                     results_dir=results_dir,
                     visualize=visualize,
                 )
+                if source == "directory":
+                    processed_files.add(image_path)
                 if source == "directory" and archive_dir is not None:
-                    target = archive_dir / image_path.name
+                    target = get_archive_target_path(archive_dir, image_path)
                     shutil.move(str(image_path), str(target))
                     LOGGER.info("Archived processed image: %s", target)
             except Exception:
@@ -425,13 +468,8 @@ def main() -> int:
     configure_logging(args.log_level)
 
     try:
-        allowed_extensions = tuple(
-            ext.strip().lower() if ext.strip().startswith(".") else f".{ext.strip().lower()}"
-            for ext in args.extensions.split(",")
-            if ext.strip()
-        )
-        if not allowed_extensions:
-            raise ValueError("No valid image extensions provided in --extensions")
+        validate_runtime_args(args)
+        allowed_extensions = parse_extensions_csv(args.extensions)
 
         run_controller(
             source=args.source,
